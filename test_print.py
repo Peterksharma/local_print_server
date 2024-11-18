@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 import sys
 from typing import Dict, Any, Optional
+import os
 
 # Configure logging
 logging.basicConfig(
@@ -21,22 +22,46 @@ class PrinterTester:
         self.base_url = f'http://{host}:{port}'
         self.printers: Dict[str, Any] = {}
         self.selected_printer: Optional[str] = None
+        # Get API key from environment or use default test key
+        self.api_key = os.environ.get('PRINT_SERVER_API_KEY', 'test_key')
 
-    def get_printers(self) -> bool:
-        """Fetch and store available printers"""
+    def get_printers(self):
         try:
             response = requests.get(f'{self.base_url}/printers')
-            response.raise_for_status()
+            response.raise_for_status()  # Raises an HTTPError for bad responses
             data = response.json()
             
-            # Store printers
-            self.printers = {
-                'local': data['local'],
-                'network': data['network']
-            }
-            return True
+            # Debug print to see the actual structure
+            print("Received data:", data)
+            
+            # Check if data exists and has the expected structure
+            if not data:
+                print("No printer data received")
+            return False
+
+            # Safely access the data with get() method
+            printers = []
+            for printer in data.get('printers', []):
+                printer_info = {
+                    'name': printer.get('name'),
+                    'local': printer.get('local', False),  # Default to False if not present
+                    'state': printer.get('state'),
+                    'accepting': printer.get('accepting', False),  # Default to False if not present
+                    'shared': printer.get('shared', False),  # Default to False if not present
+                    'uri': printer.get('uri')
+                }
+                printers.append(printer_info)
+                
+            self.printers = printers
+                    return True
         except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to get printers: {e}")
+            print(f"Error fetching printers: {e}")
+            return False
+        except KeyError as e:
+            print(f"Error parsing printer data: {e}")
+            return False
+        except Exception as e:
+            print(f"Unexpected error: {e}")
             return False
 
     def display_printer_menu(self) -> list:
@@ -106,93 +131,63 @@ class PrinterTester:
             
             c.setFont("Helvetica", 14)
             c.drawString(100, 700, f"Printer: {self.selected_printer}")
-            c.drawString(100, 680, f"Date: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-            c.drawString(100, 660, "If you can read this, the test print was successful!")
+            c.drawString(100, 680, f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            c.setFont("Helvetica", 12)
+            c.drawString(100, 600, "This is a test print to verify printer connectivity.")
+            c.drawString(100, 580, "If you can read this, the print job was successful!")
             
             c.save()
             return filename
         except Exception as e:
-            logger.error(f"Failed to create test print: {e}")
+            logger.error(f"Failed to create test print PDF: {e}")
             return None
 
-    def send_test_print(self) -> bool:
-        """Send test print to selected printer"""
+    def submit_print_job(self, pdf_file: Path) -> bool:
+        """Submit a print job to the selected printer"""
         if not self.selected_printer:
             logger.error("No printer selected")
             return False
 
-        pdf_file = self.create_test_print()
-        if not pdf_file:
-            return False
-
         try:
             with open(pdf_file, 'rb') as f:
+                files = {'file': ('test_print.pdf', f, 'application/pdf')}
+                data = {'printer': self.selected_printer}
                 response = requests.post(
                     f'{self.base_url}/print',
-                    headers={
-                        'Content-Type': 'application/pdf',
-                        'Printer-Name': self.selected_printer
-                    },
-                    data=f
+                    files=files,
+                    data=data,
+                    headers={'X-API-Key': self.api_key}
                 )
                 response.raise_for_status()
-                
-                result = response.json()
-                job_id = result.get('job_id')
-                if job_id:
-                    logger.info(f"Print job submitted successfully. Job ID: {job_id}")
-                    return True
-                return False
-        except Exception as e:
-            logger.error(f"Failed to send test print: {e}")
+                job_id = response.json().get('job_id')
+                print(f"Print job submitted successfully. Job ID: {job_id}")
+                return True
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to submit print job: {e}")
             return False
-        finally:
-            pdf_file.unlink(missing_ok=True)
-
-    def main_menu(self):
-        """Display and handle main menu"""
-        while True:
-            print("\nMain Menu")
-            print("-" * 50)
-            print("1. Select Printer")
-            print("2. Send Test Print")
-            print("3. Exit")
-            
-            choice = input("\nEnter your choice (1-3): ")
-            
-            if choice == '1':
-                self.select_printer()
-            elif choice == '2':
-                if not self.selected_printer:
-                    print("\nPlease select a printer first.")
-                    continue
-                    
-                confirm = input(f"\nSend test print to {self.selected_printer}? (y/n): ")
-                if confirm.lower() == 'y':
-                    if self.send_test_print():
-                        print("Test print sent successfully!")
-                    else:
-                        print("Failed to send test print.")
-            elif choice == '3':
-                print("\nGoodbye!")
-                break
-            else:
-                print("\nInvalid choice. Please try again.")
 
 def main():
     tester = PrinterTester()
     
-    # Check if we can connect to the print server
-    try:
-        if not tester.get_printers():
-            logger.error("Failed to connect to print server. Is it running?")
-            sys.exit(1)
-    except Exception as e:
-        logger.error(f"Error connecting to print server: {e}")
+    # Get available printers
+    if not tester.get_printers():
         sys.exit(1)
-
-    # Start the interactive menu
-    tester.main_menu()
+    
+    # Select printer
+    if not tester.select_printer():
+        sys.exit(1)
+    
+    # Create test print
+    pdf_file = tester.create_test_print()
+    if not pdf_file:
+        sys.exit(1)
+    
+    # Submit print job
+    if not tester.submit_print_job(pdf_file):
+        sys.exit(1)
+    
+    print("Test completed successfully!")
 
 if __name__ == '__main__':
     main()
